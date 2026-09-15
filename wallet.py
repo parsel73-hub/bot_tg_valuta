@@ -42,19 +42,31 @@ if not TELEGRAM_BOT_TOKEN:
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode=None)
 
+MENU_BUTTONS = {
+    "new": "Новая поездка",
+    "balance": "Баланс",
+    "topup": "Пополнить",
+    "spend": "Расход",
+    "expenses": "История расходов",
+    "trips": "Мои поездки",
+    "rate": "Курс",
+    "help": "Помощь",
+}
+PENDING_ACTIONS: dict[int, str] = {}
+
 
 def _main_menu() -> telebot.types.ReplyKeyboardMarkup:
     """Кнопочное меню с основными командами бота."""
     markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        "/new",
-        "/balance",
-        "/topup",
-        "/spend",
-        "/expenses",
-        "/trips",
-        "/rate",
-        "/help",
+        MENU_BUTTONS["new"],
+        MENU_BUTTONS["balance"],
+        MENU_BUTTONS["topup"],
+        MENU_BUTTONS["spend"],
+        MENU_BUTTONS["expenses"],
+        MENU_BUTTONS["trips"],
+        MENU_BUTTONS["rate"],
+        MENU_BUTTONS["help"],
     )
     return markup
 
@@ -63,6 +75,14 @@ def _send_menu_message(chat_id: int, text: str, **kwargs) -> None:
     """Отправить сообщение с постоянным меню команд."""
     kwargs.setdefault("reply_markup", _main_menu())
     bot.send_message(chat_id, text, **kwargs)
+
+
+def _set_pending_action(chat_id: int, action: str) -> None:
+    PENDING_ACTIONS[chat_id] = action
+
+
+def _clear_pending_action(chat_id: int) -> None:
+    PENDING_ACTIONS.pop(chat_id, None)
 
 
 # Необязательный прокси для доступа к api.telegram.org.
@@ -118,15 +138,16 @@ def cmd_start(message: telebot.types.Message) -> None:
     _send_menu_message(
         message.chat.id,
         "Привет! Я кошелёк путешественника.\n\n"
-        "Команды:\n"
-        "/new <страна дома> <страна назначения> — создать путешествие\n"
-        "/balance — балансы активного путешествия\n"
-        "/topup <сумма> — пополнить баланс (домашняя валюта)\n"
-        "/spend <сумма> — потратить (валюта назначения)\n"
-        "/expenses — последние расходы\n"
-        "/trips — список путешествий\n"
-        "/use <id> — сделать путешествие активным\n"
-        "/rate — обновить и показать текущий курс",
+        "Используйте кнопки ниже или команды как обычно.\n\n"
+        "Кнопки:\n"
+        "Новая поездка — создать путешествие\n"
+        "Баланс — посмотреть балансы\n"
+        "Пополнить — внести сумму\n"
+        "Расход — зафиксировать трату\n"
+        "История расходов — показать расходы\n"
+        "Мои поездки — список поездок\n"
+        "Курс — обновить курс\n"
+        "Помощь — подсказка",
     )
 
 
@@ -408,13 +429,101 @@ def cmd_rate(message: telebot.types.Message) -> None:
 def cmd_help(message: telebot.types.Message) -> None:
     _send_menu_message(
         message.chat.id,
-        "Я кошелёк путешественника. См. /start для списка команд.",
+        "Я кошелёк путешественника. Используйте кнопки ниже или команды через /.",
     )
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["new"])
+def btn_new(message: telebot.types.Message) -> None:
+    chat_id = message.chat.id
+    _send_menu_message(
+        chat_id,
+        "Введите страну дома и страну назначения через пробел.\nПример: Россия Турция",
+    )
+    _set_pending_action(chat_id, "new")
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["balance"])
+def btn_balance(message: telebot.types.Message) -> None:
+    cmd_balance(message)
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["topup"])
+def btn_topup(message: telebot.types.Message) -> None:
+    chat_id = message.chat.id
+    _send_menu_message(chat_id, "Введите сумму для пополнения:")
+    _set_pending_action(chat_id, "topup")
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["spend"])
+def btn_spend(message: telebot.types.Message) -> None:
+    chat_id = message.chat.id
+    _send_menu_message(chat_id, "Введите сумму расхода:")
+    _set_pending_action(chat_id, "spend")
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["expenses"])
+def btn_expenses(message: telebot.types.Message) -> None:
+    cmd_expenses(message)
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["trips"])
+def btn_trips(message: telebot.types.Message) -> None:
+    cmd_trips(message)
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["rate"])
+def btn_rate(message: telebot.types.Message) -> None:
+    cmd_rate(message)
+
+
+@bot.message_handler(func=lambda m: m.text == MENU_BUTTONS["help"])
+def btn_help(message: telebot.types.Message) -> None:
+    cmd_help(message)
+
+
+@bot.message_handler(func=lambda m: m.chat.id in PENDING_ACTIONS)
+def btn_pending_input(message: telebot.types.Message) -> None:
+    chat_id = message.chat.id
+    action = PENDING_ACTIONS.get(chat_id)
+    if not action:
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    if action == "new":
+        _clear_pending_action(chat_id)
+        parts = text.split()
+        if len(parts) < 2:
+            _send_menu_message(chat_id, "Введите две страны: страна дома и страна назначения.")
+            return
+        fake = f"/new {parts[0]} {parts[1]}"
+        message.text = fake
+        cmd_new(message)
+        return
+
+    if action == "topup":
+        _clear_pending_action(chat_id)
+        fake = f"/topup {text}"
+        message.text = fake
+        cmd_topup(message)
+        return
+
+    if action == "spend":
+        _clear_pending_action(chat_id)
+        fake = f"/spend {text}"
+        message.text = fake
+        cmd_spend(message)
+        return
+
+    _clear_pending_action(chat_id)
 
 
 @bot.message_handler(func=lambda m: bool((m.text or "").startswith("/")))
 def cmd_unknown(message: telebot.types.Message) -> None:
-    _send_menu_message(message.chat.id, "Неизвестная команда. /start")
+    _send_menu_message(message.chat.id, "Неизвестная команда. Используйте кнопки или /start")
 
 
 # Параметры повторов при сетевых сбоях (ConnectTimeout и аналоги).
