@@ -42,6 +42,29 @@ if not TELEGRAM_BOT_TOKEN:
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode=None)
 
+
+def _main_menu() -> telebot.types.ReplyKeyboardMarkup:
+    """Кнопочное меню с основными командами бота."""
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        "/new",
+        "/balance",
+        "/topup",
+        "/spend",
+        "/expenses",
+        "/trips",
+        "/rate",
+        "/help",
+    )
+    return markup
+
+
+def _send_menu_message(chat_id: int, text: str, **kwargs) -> None:
+    """Отправить сообщение с постоянным меню команд."""
+    kwargs.setdefault("reply_markup", _main_menu())
+    bot.send_message(chat_id, text, **kwargs)
+
+
 # Необязательный прокси для доступа к api.telegram.org.
 # Примеры значений TELEGRAM_PROXY в .env:
 #   socks5h://127.0.0.1:1080
@@ -70,14 +93,14 @@ def _active_trip_or_reply(user_id: int, chat_id: int):
     """Вернуть активное путешествие; если его нет — отправить подсказку."""
     trip_id = storage.get_active_trip_id(user_id)
     if trip_id is None:
-        bot.send_message(
+        _send_menu_message(
             chat_id,
             "Нет активного путешествия. Создайте: /new <дом> <назначение>",
         )
         return None
     trip = storage.get_trip(trip_id, user_id)
     if trip is None:
-        bot.send_message(
+        _send_menu_message(
             chat_id,
             "Активное путешествие не найдено. Создайте новое: /new",
         )
@@ -92,7 +115,7 @@ def _active_trip_or_reply(user_id: int, chat_id: int):
 def cmd_start(message: telebot.types.Message) -> None:
     user_id = message.from_user.id
     storage.ensure_user(user_id)
-    bot.send_message(
+    _send_menu_message(
         message.chat.id,
         "Привет! Я кошелёк путешественника.\n\n"
         "Команды:\n"
@@ -383,7 +406,7 @@ def cmd_rate(message: telebot.types.Message) -> None:
 
 @bot.message_handler(commands=["help", "помощь"])
 def cmd_help(message: telebot.types.Message) -> None:
-    bot.send_message(
+    _send_menu_message(
         message.chat.id,
         "Я кошелёк путешественника. См. /start для списка команд.",
     )
@@ -391,7 +414,7 @@ def cmd_help(message: telebot.types.Message) -> None:
 
 @bot.message_handler(func=lambda m: bool((m.text or "").startswith("/")))
 def cmd_unknown(message: telebot.types.Message) -> None:
-    bot.send_message(message.chat.id, "Неизвестная команда. /start")
+    _send_menu_message(message.chat.id, "Неизвестная команда. /start")
 
 
 # Параметры повторов при сетевых сбоях (ConnectTimeout и аналоги).
