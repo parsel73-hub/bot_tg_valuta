@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
+import requests
 import telebot
 from dotenv import load_dotenv
 
@@ -39,6 +41,16 @@ if not TELEGRAM_BOT_TOKEN:
     )
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, parse_mode=None)
+
+# Необязательный прокси для доступа к api.telegram.org.
+# Примеры значений TELEGRAM_PROXY в .env:
+#   socks5h://127.0.0.1:1080
+#   http://127.0.0.1:8888
+# Требует: pip install requests[socks]
+TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
+if TELEGRAM_PROXY:
+    telebot.apihelper.proxy = {"https": TELEGRAM_PROXY}
+    log.info("wallet: использую прокси для Telegram: %s", TELEGRAM_PROXY)
 
 
 # ---------------------------------------------------------------------------
@@ -382,13 +394,107 @@ def cmd_unknown(message: telebot.types.Message) -> None:
     bot.send_message(message.chat.id, "Неизвестная команда. /start")
 
 
+# Параметры повторов при сетевых сбоях (ConnectTimeout и аналоги).
+POLL_CONNECT_TIMEOUT = int(os.getenv("POLL_CONNECT_TIMEOUT", "15"))
+POLL_READ_TIMEOUT = int(os.getenv("POLL_READ_TIMEOUT", "30"))
+MAX_RETRIES = int(os.getenv("POLL_MAX_RETRIES", "0"))  # 0 = бесконечно
+RETRY_BASE_DELAY = float(os.getenv("POLL_RETRY_BASE_DELAY", "3"))  # сек
+RETRY_MAX_DELAY = float(os.getenv("POLL_RETRY_MAX_DELAY", "60"))  # сек
+
+# Сетевые исключения, которые считаем «временным сбоем связи».
+NETWORK_ERRORS = (
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    telebot.apihelper.ApiTelegramException,
+)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Определить, связан ли сбой с сетью (в т.ч. вложенные причины)."""
+    if isinstance(exc, NETWORK_ERRORS):
+        return True
+    # telebot иногда оборачивает requests-ошибку в свою.
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _is_network_error(cause)
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "timed out",
+            "connection",
+            "max retries exceeded",
+            "timeout",
+        )
+    )
+
+
+def _run_polling_with_retries() -> None:
+    """Запустить polling; при сетевых сбоях — повтор с экспоненциальной задержкой."""
+    attempt = 0
+    while True:
+        try:
+            log.info(
+                "wallet: подключаюсь к Telegram (connect=%ss, read=%ss)…",
+                POLL_CONNECT_TIMEOUT,
+                POLL_READ_TIMEOUT,
+            )
+            # none_stop=False, чтобы исключения всплывали в наш обработчик
+            # и мы сами управляли паузами и повторами.
+            bot.polling(
+                none_stop=False,
+                interval=1,
+                timeout=POLL_READ_TIMEOUT,
+            )
+            # Если polling вернулся без исключения — штатно выходим.
+            log.info("wallet: polling завершён без ошибки.")
+            return
+        except KeyboardInterrupt:
+            log.info("wallet: остановлено пользователем (Ctrl+C).")
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not _is_network_error(exc):
+                # Не сеть — чиним код, а не ждём.
+                log.exception(
+                    "wallet: polling упал с НЕ-сетевой ошибкой. "
+                    "Это не проблема связи — проверьте код/данные. "
+                    "Останавливаюсь."
+                )
+                raise
+
+            attempt += 1
+            if MAX_RETRIES and attempt > MAX_RETRIES:
+                log.error(
+                    "wallet: не удалось связаться с Telegram после %s "
+                    "повторов. Останавливаюсь. Тип: %s: %s",
+                    MAX_RETRIES,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+
+            # Экспоненциальная задержка с ограничением сверху.
+            delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+            log.warning(
+                "wallet: нет связи с Telegram (попытка %s%s). "
+                "Тип: %s: %s. Повтор через %.0f c. "
+                "Если блокировка сети — настройте прокси "
+                "(см. TELEGRAM_PROXY в .env) или смените сеть.",
+                attempt,
+                f"/{MAX_RETRIES}" if MAX_RETRIES else "",
+                type(exc).__name__,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+
+
 def main() -> None:
     storage.init_db()
     log.info("wallet: БД инициализирована, запускаю бота…")
-    try:
-        bot.polling(none_stop=True, interval=1, timeout=30)
-    except Exception:  # noqa: BLE001
-        log.exception("polling упал с ошибкой")
+    _run_polling_with_retries()
 
 
 if __name__ == "__main__":
